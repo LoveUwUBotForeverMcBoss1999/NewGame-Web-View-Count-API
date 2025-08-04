@@ -1,15 +1,25 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import requests
+import discord
 import json
+import asyncio
+import threading
 import os
 from datetime import datetime
+import requests
 
 app = Flask(__name__)
 CORS(app, origins=["https://tunsub.mcboss.top"])
 
-# In-memory storage (will reset on each cold start)
+# Discord bot setup
+intents = discord.Intents.default()
+intents.message_content = True
+bot = discord.Client(intents=intents)
+
+# Global variables
 views_data = {}
+bot_ready = False
+channel = None
 
 
 def get_ip_info(ip):
@@ -38,32 +48,74 @@ def get_device_info(user_agent):
         return "Desktop"
 
 
-def send_to_discord():
-    """Send views data to Discord using webhook"""
-    webhook_url = os.environ.get('DISCORD_WEBHOOK_URL')
-    if not webhook_url:
-        print("DISCORD_WEBHOOK_URL not found")
+async def update_views_file():
+    """Update the views.json file in Discord"""
+    global channel, views_data
+
+    if not channel or not bot_ready:
         return False
 
     try:
         # Create JSON content
         json_content = json.dumps(views_data, indent=2)
 
-        # Send as a file attachment
-        files = {
-            'file': ('views.json', json_content, 'application/json')
-        }
+        # Delete old views.json file if exists
+        async for message in channel.history(limit=100):
+            if message.author == bot.user and message.attachments:
+                for attachment in message.attachments:
+                    if attachment.filename == 'views.json':
+                        await message.delete()
+                        break
 
-        data = {
-            'content': f'📊 **View Stats Updated** - Total unique IPs: {len(views_data)}'
-        }
-
-        response = requests.post(webhook_url, data=data, files=files, timeout=10)
-        return response.status_code == 200
+        # Upload new views.json file
+        import io
+        file_buffer = io.BytesIO(json_content.encode('utf-8'))
+        file = discord.File(file_buffer, filename='views.json')
+        await channel.send(f"📊 **Views Updated** - Total unique IPs: {len(views_data)}", file=file)
+        return True
 
     except Exception as e:
-        print(f"Error sending to Discord: {e}")
+        print(f"Error updating views file: {e}")
         return False
+
+
+@bot.event
+async def on_ready():
+    global bot_ready, channel
+    print(f'Bot logged in as {bot.user}')
+    bot_ready = True
+
+    # Get channel
+    try:
+        channel_id = int(os.environ.get('CHANNEL_ID'))
+        channel = bot.get_channel(channel_id)
+        if channel:
+            print(f"Connected to channel: {channel.name}")
+        else:
+            print(f"Channel with ID {channel_id} not found")
+    except Exception as e:
+        print(f"Error getting channel: {e}")
+
+
+def run_bot():
+    """Run the Discord bot in a separate thread"""
+    token = os.environ.get('DISCORD_BOT_TOKEN')
+    if not token:
+        print("DISCORD_BOT_TOKEN not found")
+        return
+
+    try:
+        # Create new event loop for the thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot.start(token))
+    except Exception as e:
+        print(f"Bot error: {e}")
+
+
+# Start bot in background thread
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
 
 
 @app.route('/', methods=['GET'])
@@ -97,7 +149,7 @@ def track_view():
         views_data[client_ip]['total_views'] += 1
         views_data[client_ip]['last_viewed'] = current_time
     else:
-        # New IP
+        # New IP - create new entry
         views_data[client_ip] = {
             'first_viewed': current_time,
             'last_viewed': current_time,
@@ -106,15 +158,21 @@ def track_view():
             'device': device
         }
 
-    # Send to Discord (only for new IPs to avoid spam)
-    if is_new_ip:
-        send_to_discord()
+    # Update Discord file (for both new and existing IPs as requested)
+    if bot_ready and channel:
+        try:
+            # Run the async function in bot's event loop
+            future = asyncio.run_coroutine_threadsafe(update_views_file(), bot.loop)
+            # Don't wait for completion to avoid blocking the request
+        except Exception as e:
+            print(f"Error scheduling Discord update: {e}")
 
     return jsonify({
         'status': 'success',
         'ip': client_ip,
         'total_views': views_data[client_ip]['total_views'],
-        'first_viewed': views_data[client_ip]['first_viewed']
+        'first_viewed': views_data[client_ip]['first_viewed'],
+        'is_new_visitor': is_new_ip
     })
 
 
@@ -123,7 +181,9 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'total_unique_ips': len(views_data)
+        'bot_ready': bot_ready,
+        'total_unique_ips': len(views_data),
+        'channel_connected': channel is not None
     })
 
 
