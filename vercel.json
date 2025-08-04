@@ -12,10 +12,6 @@
       "dest": "app.py"
     }
   ],
-  "env": {
-    "DISCORD_BOT_TOKEN": "@discord_bot_token",
-    "CHANNEL_ID": "@channel_id"
-  },
   "functions": {
     "app.py": {
       "maxDuration": 30
