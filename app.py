@@ -1,10 +1,9 @@
 import json
 import os
 import requests
-import aiohttp
-import asyncio
 from datetime import datetime
 from flask import Flask, request, jsonify
+import io
 
 app = Flask(__name__)
 
@@ -25,38 +24,49 @@ class DiscordAPI:
             "Content-Type": "application/json"
         }
 
-    async def get_channel_messages(self, limit=50):
+    def get_channel_messages(self, limit=50):
         """Get recent messages from channel"""
         url = f"{self.base_url}/channels/{self.channel_id}/messages"
         params = {"limit": limit}
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self.headers, params=params) as response:
-                if response.status == 200:
-                    return await response.json()
-                return []
+        try:
+            response = requests.get(url, headers=self.headers, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            return []
+        except Exception as e:
+            print(f"Error getting messages: {e}")
+            return []
 
-    async def delete_message(self, message_id):
+    def delete_message(self, message_id):
         """Delete a message"""
         url = f"{self.base_url}/channels/{self.channel_id}/messages/{message_id}"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.delete(url, headers=self.headers) as response:
-                return response.status == 204
+        try:
+            response = requests.delete(url, headers=self.headers, timeout=10)
+            return response.status_code == 204
+        except Exception as e:
+            print(f"Error deleting message: {e}")
+            return False
 
-    async def send_file(self, content, file_data, filename):
+    def send_file(self, content, file_data, filename):
         """Send a file to Discord channel"""
         url = f"{self.base_url}/channels/{self.channel_id}/messages"
 
-        data = aiohttp.FormData()
-        data.add_field('content', content)
-        data.add_field('files[0]', file_data, filename=filename, content_type='application/json')
-
+        files = {
+            'files[0]': (filename, file_data, 'application/json')
+        }
+        data = {
+            'content': content
+        }
         headers = {"Authorization": f"Bot {self.token}"}
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, data=data) as response:
-                return response.status == 200
+        try:
+            response = requests.post(url, headers=headers, data=data, files=files, timeout=30)
+            return response.status_code == 200
+        except Exception as e:
+            print(f"Error sending file: {e}")
+            return False
 
 
 class ViewTracker:
@@ -64,22 +74,20 @@ class ViewTracker:
         self.discord = DiscordAPI(DISCORD_BOT_TOKEN, CHANNEL_ID)
         self.views_data = {}
 
-    async def load_views_from_discord(self):
+    def load_views_from_discord(self):
         """Load existing views data from Discord channel"""
         try:
-            messages = await self.discord.get_channel_messages()
+            messages = self.discord.get_channel_messages()
 
             for message in messages:
                 if message.get('attachments'):
                     for attachment in message['attachments']:
                         if attachment['filename'] == VIEWS_FILE:
                             # Download the file
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(attachment['url']) as response:
-                                    if response.status == 200:
-                                        file_content = await response.text()
-                                        self.views_data = json.loads(file_content)
-                                        return
+                            response = requests.get(attachment['url'], timeout=10)
+                            if response.status_code == 200:
+                                self.views_data = response.json()
+                                return
 
             # If no file found, initialize empty data
             self.views_data = {}
@@ -88,18 +96,18 @@ class ViewTracker:
             print(f"Error loading views from Discord: {e}")
             self.views_data = {}
 
-    async def save_views_to_discord(self):
+    def save_views_to_discord(self):
         """Save views data to Discord channel"""
         try:
             # Load current messages to find old views.json
-            messages = await self.discord.get_channel_messages()
+            messages = self.discord.get_channel_messages()
 
             # Delete old views.json messages
             for message in messages:
                 if message.get('attachments'):
                     for attachment in message['attachments']:
                         if attachment['filename'] == VIEWS_FILE:
-                            await self.discord.delete_message(message['id'])
+                            self.discord.delete_message(message['id'])
                             break
 
             # Create new file content
@@ -115,10 +123,12 @@ class ViewTracker:
                        f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
             # Send new file
-            await self.discord.send_file(content, json_content.encode(), VIEWS_FILE)
+            file_data = io.BytesIO(json_content.encode())
+            return self.discord.send_file(content, file_data, VIEWS_FILE)
 
         except Exception as e:
             print(f"Error saving views to Discord: {e}")
+            return False
 
     def get_ip_info(self, ip):
         """Get location info for IP"""
@@ -132,8 +142,8 @@ class ViewTracker:
                     "city": data.get("city", "Unknown"),
                     "timezone": data.get("timezone", "Unknown")
                 }
-        except:
-            pass
+        except Exception as e:
+            print(f"Error getting IP info: {e}")
 
         return {
             "country": "Unknown",
@@ -207,51 +217,41 @@ def track_view():
         user_agent = request.headers.get('User-Agent', '')
         current_time = datetime.now().isoformat()
 
-        # Run async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Load existing data
+        tracker.load_views_from_discord()
 
-        async def process_view():
-            # Load existing data
-            await tracker.load_views_from_discord()
+        # Get IP and device info
+        ip_info = tracker.get_ip_info(client_ip)
+        device_info = tracker.get_device_info(user_agent)
 
-            # Get IP and device info
-            ip_info = tracker.get_ip_info(client_ip)
-            device_info = tracker.get_device_info(user_agent)
-
-            # Check if IP exists
-            if client_ip in tracker.views_data:
-                # IP exists - increment view count and update last viewed
-                tracker.views_data[client_ip]["total_views"] += 1
-                tracker.views_data[client_ip]["last_viewed"] = current_time
-                is_new_visitor = False
-            else:
-                # New IP - create new entry
-                tracker.views_data[client_ip] = {
-                    "first_viewed": current_time,
-                    "last_viewed": current_time,
-                    "total_views": 1,
-                    "region": f"{ip_info['city']}, {ip_info['region']}, {ip_info['country']}",
-                    "timezone": ip_info['timezone'],
-                    "device": device_info,
-                    "user_agent": user_agent
-                }
-                is_new_visitor = True
-
-            # Save to Discord
-            await tracker.save_views_to_discord()
-
-            return {
-                "success": True,
-                "is_new_visitor": is_new_visitor,
-                "total_views": tracker.views_data[client_ip]["total_views"],
-                "total_unique_visitors": len(tracker.views_data)
+        # Check if IP exists
+        if client_ip in tracker.views_data:
+            # IP exists - increment view count and update last viewed
+            tracker.views_data[client_ip]["total_views"] += 1
+            tracker.views_data[client_ip]["last_viewed"] = current_time
+            is_new_visitor = False
+        else:
+            # New IP - create new entry
+            tracker.views_data[client_ip] = {
+                "first_viewed": current_time,
+                "last_viewed": current_time,
+                "total_views": 1,
+                "region": f"{ip_info['city']}, {ip_info['region']}, {ip_info['country']}",
+                "timezone": ip_info['timezone'],
+                "device": device_info,
+                "user_agent": user_agent
             }
+            is_new_visitor = True
 
-        result = loop.run_until_complete(process_view())
-        loop.close()
+        # Save to Discord
+        tracker.save_views_to_discord()
 
-        return jsonify(result)
+        return jsonify({
+            "success": True,
+            "is_new_visitor": is_new_visitor,
+            "total_views": tracker.views_data[client_ip]["total_views"],
+            "total_unique_visitors": len(tracker.views_data)
+        })
 
     except Exception as e:
         print(f"Error in track_view: {e}")
@@ -266,24 +266,15 @@ def get_stats():
             return jsonify({"error": "Discord configuration missing"}), 500
 
         # Load current data
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        tracker.load_views_from_discord()
+        total_unique = len(tracker.views_data)
+        total_views = sum(data["total_views"] for data in tracker.views_data.values())
 
-        async def get_current_stats():
-            await tracker.load_views_from_discord()
-            total_unique = len(tracker.views_data)
-            total_views = sum(data["total_views"] for data in tracker.views_data.values())
-
-            return {
-                "total_unique_visitors": total_unique,
-                "total_views": total_views,
-                "data": tracker.views_data
-            }
-
-        result = loop.run_until_complete(get_current_stats())
-        loop.close()
-
-        return jsonify(result)
+        return jsonify({
+            "total_unique_visitors": total_unique,
+            "total_views": total_views,
+            "data": tracker.views_data
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -292,11 +283,6 @@ def get_stats():
 @app.route('/')
 def home():
     return jsonify({"message": "View Tracker API is running"})
-
-
-# Vercel serverless handler
-def handler(request):
-    return app(request.environ, lambda *args: None)
 
 
 if __name__ == '__main__':
