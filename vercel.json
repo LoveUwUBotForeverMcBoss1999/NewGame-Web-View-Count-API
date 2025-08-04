@@ -1,7 +1,7 @@
 {
   "version": 2,
   "functions": {
-    "app.py": {
+    "api/index.py": {
       "runtime": "@vercel/python@4.3.0",
       "maxDuration": 30
     }
@@ -9,15 +9,15 @@
   "routes": [
     {
       "src": "/track-view",
-      "dest": "app.py"
+      "dest": "/api/index.py"
     },
     {
       "src": "/stats",
-      "dest": "app.py"
+      "dest": "/api/index.py"
     },
     {
       "src": "/(.*)",
-      "dest": "app.py"
+      "dest": "/api/index.py"
     }
   ]
 }
