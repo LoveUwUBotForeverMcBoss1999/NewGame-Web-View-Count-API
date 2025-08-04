@@ -1,25 +1,16 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import discord
+import requests
 import json
-import asyncio
-import threading
 import os
 from datetime import datetime
-import requests
+import io
 
 app = Flask(__name__)
 CORS(app, origins=["https://tunsub.mcboss.top"])
 
-# Discord bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-bot = discord.Client(intents=intents)
-
-# Global variables
+# In-memory storage
 views_data = {}
-bot_ready = False
-channel = None
 
 
 def get_ip_info(ip):
@@ -48,74 +39,65 @@ def get_device_info(user_agent):
         return "Desktop"
 
 
-async def update_views_file():
-    """Update the views.json file in Discord"""
-    global channel, views_data
+def update_discord_file():
+    """Update views.json file in Discord using Discord API"""
+    bot_token = os.environ.get('DISCORD_BOT_TOKEN')
+    channel_id = os.environ.get('CHANNEL_ID')
 
-    if not channel or not bot_ready:
+    if not bot_token or not channel_id:
+        print("Missing DISCORD_BOT_TOKEN or CHANNEL_ID")
         return False
 
     try:
-        # Create JSON content
+        headers = {
+            'Authorization': f'Bot {bot_token}',
+            'Content-Type': 'application/json'
+        }
+
+        # Step 1: Get recent messages to find and delete old views.json
+        messages_url = f'https://discord.com/api/v10/channels/{channel_id}/messages?limit=50'
+        response = requests.get(messages_url, headers=headers, timeout=10)
+
+        if response.status_code == 200:
+            messages = response.json()
+            # Delete old views.json files
+            for message in messages:
+                if message.get('attachments'):
+                    for attachment in message['attachments']:
+                        if attachment['filename'] == 'views.json':
+                            delete_url = f'https://discord.com/api/v10/channels/{channel_id}/messages/{message["id"]}'
+                            requests.delete(delete_url, headers=headers, timeout=10)
+                            break
+
+        # Step 2: Upload new views.json file
         json_content = json.dumps(views_data, indent=2)
 
-        # Delete old views.json file if exists
-        async for message in channel.history(limit=100):
-            if message.author == bot.user and message.attachments:
-                for attachment in message.attachments:
-                    if attachment.filename == 'views.json':
-                        await message.delete()
-                        break
+        files = {
+            'file': ('views.json', json_content, 'application/json')
+        }
 
-        # Upload new views.json file
-        import io
-        file_buffer = io.BytesIO(json_content.encode('utf-8'))
-        file = discord.File(file_buffer, filename='views.json')
-        await channel.send(f"📊 **Views Updated** - Total unique IPs: {len(views_data)}", file=file)
-        return True
+        payload = {
+            'content': f'📊 **Views Updated** - Total unique IPs: {len(views_data)}'
+        }
 
-    except Exception as e:
-        print(f"Error updating views file: {e}")
-        return False
+        # Remove Content-Type for multipart
+        upload_headers = {
+            'Authorization': f'Bot {bot_token}'
+        }
 
+        upload_url = f'https://discord.com/api/v10/channels/{channel_id}/messages'
+        response = requests.post(upload_url, headers=upload_headers, data=payload, files=files, timeout=15)
 
-@bot.event
-async def on_ready():
-    global bot_ready, channel
-    print(f'Bot logged in as {bot.user}')
-    bot_ready = True
-
-    # Get channel
-    try:
-        channel_id = int(os.environ.get('CHANNEL_ID'))
-        channel = bot.get_channel(channel_id)
-        if channel:
-            print(f"Connected to channel: {channel.name}")
+        if response.status_code == 200:
+            print("Successfully updated views.json in Discord")
+            return True
         else:
-            print(f"Channel with ID {channel_id} not found")
+            print(f"Failed to upload file: {response.status_code} - {response.text}")
+            return False
+
     except Exception as e:
-        print(f"Error getting channel: {e}")
-
-
-def run_bot():
-    """Run the Discord bot in a separate thread"""
-    token = os.environ.get('DISCORD_BOT_TOKEN')
-    if not token:
-        print("DISCORD_BOT_TOKEN not found")
-        return
-
-    try:
-        # Create new event loop for the thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(bot.start(token))
-    except Exception as e:
-        print(f"Bot error: {e}")
-
-
-# Start bot in background thread
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
+        print(f"Error updating Discord file: {e}")
+        return False
 
 
 @app.route('/', methods=['GET'])
@@ -143,9 +125,9 @@ def track_view():
     # Track if this is a new IP
     is_new_ip = client_ip not in views_data
 
-    # Check if IP already exists
+    # Update or create IP entry
     if client_ip in views_data:
-        # Update existing IP data
+        # Existing IP - update view count and last viewed
         views_data[client_ip]['total_views'] += 1
         views_data[client_ip]['last_viewed'] = current_time
     else:
@@ -158,21 +140,16 @@ def track_view():
             'device': device
         }
 
-    # Update Discord file (for both new and existing IPs as requested)
-    if bot_ready and channel:
-        try:
-            # Run the async function in bot's event loop
-            future = asyncio.run_coroutine_threadsafe(update_views_file(), bot.loop)
-            # Don't wait for completion to avoid blocking the request
-        except Exception as e:
-            print(f"Error scheduling Discord update: {e}")
+    # Update Discord file EVERY TIME (both new and existing IPs)
+    discord_success = update_discord_file()
 
     return jsonify({
         'status': 'success',
         'ip': client_ip,
         'total_views': views_data[client_ip]['total_views'],
         'first_viewed': views_data[client_ip]['first_viewed'],
-        'is_new_visitor': is_new_ip
+        'is_new_visitor': is_new_ip,
+        'discord_updated': discord_success
     })
 
 
@@ -181,9 +158,7 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'bot_ready': bot_ready,
-        'total_unique_ips': len(views_data),
-        'channel_connected': channel is not None
+        'total_unique_ips': len(views_data)
     })
 
 
