@@ -162,6 +162,66 @@ def health_check():
     })
 
 
+@app.route('/status', methods=['GET'])
+def status():
+    """Detailed status endpoint"""
+    bot_token = os.environ.get('DISCORD_BOT_TOKEN')
+    channel_id = os.environ.get('CHANNEL_ID')
+
+    # Test Discord API connection
+    discord_status = "disconnected"
+    channel_name = "unknown"
+
+    if bot_token and channel_id:
+        try:
+            headers = {'Authorization': f'Bot {bot_token}'}
+            response = requests.get(f'https://discord.com/api/v10/channels/{channel_id}', headers=headers, timeout=5)
+            if response.status_code == 200:
+                channel_data = response.json()
+                discord_status = "connected"
+                channel_name = channel_data.get('name', 'unknown')
+            else:
+                discord_status = f"error_{response.status_code}"
+        except:
+            discord_status = "connection_failed"
+
+    return jsonify({
+        'api_status': 'running',
+        'discord_status': discord_status,
+        'channel_name': channel_name,
+        'channel_id': channel_id,
+        'total_unique_ips': len(views_data),
+        'total_views': sum(ip_data['total_views'] for ip_data in views_data.values()),
+        'bot_token_set': bool(bot_token),
+        'channel_id_set': bool(channel_id),
+        'cors_origin': 'https://tunsub.mcboss.top',
+        'last_update': datetime.now().isoformat()
+    })
+
+
+@app.route('/details', methods=['GET'])
+def full_details():
+    """Full details endpoint with all tracked data"""
+    return jsonify({
+        'status': 'success',
+        'total_unique_ips': len(views_data),
+        'total_views': sum(ip_data['total_views'] for ip_data in views_data.values()),
+        'views_data': views_data,
+        'statistics': {
+            'most_active_ip': max(views_data.items(), key=lambda x: x[1]['total_views']) if views_data else None,
+            'regions': list(set(ip_data['region'] for ip_data in views_data.values())),
+            'devices': list(set(ip_data['device'] for ip_data in views_data.values())),
+            'device_count': {
+                'Mobile': sum(1 for ip_data in views_data.values() if ip_data['device'] == 'Mobile'),
+                'Desktop': sum(1 for ip_data in views_data.values() if ip_data['device'] == 'Desktop'),
+                'Tablet': sum(1 for ip_data in views_data.values() if ip_data['device'] == 'Tablet'),
+                'Unknown': sum(1 for ip_data in views_data.values() if ip_data['device'] == 'Unknown')
+            }
+        },
+        'generated_at': datetime.now().isoformat()
+    })
+
+
 # For local testing
 if __name__ == '__main__':
     app.run(debug=True)
