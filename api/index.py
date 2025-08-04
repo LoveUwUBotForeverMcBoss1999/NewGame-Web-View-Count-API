@@ -2,10 +2,7 @@ import json
 import os
 import requests
 from datetime import datetime
-from flask import Flask, request, jsonify
 import io
-
-app = Flask(__name__)
 
 # Get environment variables
 DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
@@ -197,23 +194,32 @@ class ViewTracker:
 tracker = ViewTracker()
 
 
-def track_view():
+def handle_track_view(request):
     try:
         # Check if required env vars are set
         if not DISCORD_BOT_TOKEN or not CHANNEL_ID:
-            return jsonify({"error": "Discord configuration missing"}), 500
+            return {
+                "statusCode": 500,
+                "body": json.dumps({"error": "Discord configuration missing"})
+            }
+
+        # Get headers from request
+        headers = getattr(request, 'headers', {})
 
         # Check referrer
-        referrer = request.headers.get('Referer', '')
+        referrer = headers.get('referer', headers.get('Referer', ''))
         if not referrer.startswith(ALLOWED_REFERRER):
-            return jsonify({"error": "Unauthorized referrer"}), 403
+            return {
+                "statusCode": 403,
+                "body": json.dumps({"error": "Unauthorized referrer"})
+            }
 
         # Get client IP
-        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        client_ip = headers.get('x-forwarded-for', headers.get('X-Forwarded-For', '127.0.0.1'))
         if ',' in client_ip:
             client_ip = client_ip.split(',')[0].strip()
 
-        user_agent = request.headers.get('User-Agent', '')
+        user_agent = headers.get('user-agent', headers.get('User-Agent', ''))
         current_time = datetime.now().isoformat()
 
         # Load existing data
@@ -245,57 +251,79 @@ def track_view():
         # Save to Discord
         tracker.save_views_to_discord()
 
-        return jsonify({
-            "success": True,
-            "is_new_visitor": is_new_visitor,
-            "total_views": tracker.views_data[client_ip]["total_views"],
-            "total_unique_visitors": len(tracker.views_data)
-        })
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({
+                "success": True,
+                "is_new_visitor": is_new_visitor,
+                "total_views": tracker.views_data[client_ip]["total_views"],
+                "total_unique_visitors": len(tracker.views_data)
+            })
+        }
 
     except Exception as e:
         print(f"Error in track_view: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": "Internal server error"})
+        }
 
 
-def get_stats():
+def handle_stats(request):
     """Get current statistics"""
     try:
         if not DISCORD_BOT_TOKEN or not CHANNEL_ID:
-            return jsonify({"error": "Discord configuration missing"}), 500
+            return {
+                "statusCode": 500,
+                "body": json.dumps({"error": "Discord configuration missing"})
+            }
 
         # Load current data
         tracker.load_views_from_discord()
         total_unique = len(tracker.views_data)
         total_views = sum(data["total_views"] for data in tracker.views_data.values())
 
-        return jsonify({
-            "total_unique_visitors": total_unique,
-            "total_views": total_views,
-            "data": tracker.views_data
-        })
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({
+                "total_unique_visitors": total_unique,
+                "total_views": total_views,
+                "data": tracker.views_data
+            })
+        }
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
 
 
-def home():
-    return jsonify({"message": "View Tracker API is running"})
+def handle_home(request):
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"message": "View Tracker API is running"})
+    }
 
 
 # Main handler function for Vercel
-def handler(request):
-    with app.app_context():
-        if request.path == '/track-view':
-            return track_view()
-        elif request.path == '/stats':
-            return get_stats()
+def handler(request, context):
+    try:
+        path = getattr(request, 'path', getattr(request, 'url', '/'))
+
+        if path == '/track-view':
+            return handle_track_view(request)
+        elif path == '/stats':
+            return handle_stats(request)
         else:
-            return home()
+            return handle_home(request)
 
-
-# For local testing
-if __name__ == '__main__':
-    app.add_url_rule('/track-view', 'track_view', track_view, methods=['GET', 'POST'])
-    app.add_url_rule('/stats', 'stats', get_stats, methods=['GET'])
-    app.add_url_rule('/', 'home', home)
-    app.run(debug=True)
+    except Exception as e:
+        print(f"Handler error: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": "Handler failed"})
+        }
