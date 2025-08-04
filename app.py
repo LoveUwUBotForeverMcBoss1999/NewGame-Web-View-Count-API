@@ -171,5 +171,9 @@ def health_check():
     })
 
 
+# For local testing
 if __name__ == '__main__':
     app.run(debug=True)
+
+# Vercel entry point
+app = app
