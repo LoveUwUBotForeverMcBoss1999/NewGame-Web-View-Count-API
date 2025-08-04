@@ -8,6 +8,14 @@
   ],
   "routes": [
     {
+      "src": "/track-view",
+      "dest": "app.py"
+    },
+    {
+      "src": "/stats",
+      "dest": "app.py"
+    },
+    {
       "src": "/(.*)",
       "dest": "app.py"
     }
