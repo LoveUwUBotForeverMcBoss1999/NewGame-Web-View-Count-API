@@ -1,10 +1,12 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import requests
 import json
 import os
 from datetime import datetime
 
 app = Flask(__name__)
+CORS(app, origins=["https://tunsub.mcboss.top"])
 
 # In-memory storage (will reset on each cold start)
 views_data = {}
@@ -124,10 +126,6 @@ def health_check():
         'total_unique_ips': len(views_data)
     })
 
-
-# For local testing
-if __name__ == '__main__':
-    app.run(debug=True)
 
 # For local testing
 if __name__ == '__main__':
