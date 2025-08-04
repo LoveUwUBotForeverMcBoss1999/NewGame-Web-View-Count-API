@@ -1,23 +1,13 @@
 from flask import Flask, request, jsonify
-import discord
+import requests
 import json
-import asyncio
-import threading
 import os
 from datetime import datetime
-import requests
 
 app = Flask(__name__)
 
-# Discord bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-bot = discord.Client(intents=intents)
-
-# Global variables
+# In-memory storage (will reset on each cold start)
 views_data = {}
-bot_ready = False
-channel = None
 
 
 def get_ip_info(ip):
@@ -46,70 +36,32 @@ def get_device_info(user_agent):
         return "Desktop"
 
 
-async def update_views_file():
-    """Update the views.json file in Discord"""
-    global channel, views_data
-
-    if not channel:
+def send_to_discord():
+    """Send views data to Discord using webhook"""
+    webhook_url = os.environ.get('DISCORD_WEBHOOK_URL')
+    if not webhook_url:
+        print("DISCORD_WEBHOOK_URL not found")
         return False
 
     try:
         # Create JSON content
         json_content = json.dumps(views_data, indent=2)
 
-        # Check if views.json already exists
-        messages = []
-        async for message in channel.history(limit=100):
-            if message.author == bot.user and message.attachments:
-                for attachment in message.attachments:
-                    if attachment.filename == 'views.json':
-                        await message.delete()
-                        break
+        # Send as a file attachment
+        files = {
+            'file': ('views.json', json_content, 'application/json')
+        }
 
-        # Upload new file
-        import io
-        file_buffer = io.StringIO(json_content)
-        file = discord.File(file_buffer, filename='views.json')
-        await channel.send(file=file)
-        return True
+        data = {
+            'content': f'📊 **View Stats Updated** - Total unique IPs: {len(views_data)}'
+        }
+
+        response = requests.post(webhook_url, data=data, files=files, timeout=10)
+        return response.status_code == 200
 
     except Exception as e:
-        print(f"Error updating views file: {e}")
+        print(f"Error sending to Discord: {e}")
         return False
-
-
-@bot.event
-async def on_ready():
-    global bot_ready, channel
-    print(f'Bot logged in as {bot.user}')
-    bot_ready = True
-
-    # Get channel
-    channel_id = int(os.environ.get('CHANNEL_ID'))
-    channel = bot.get_channel(channel_id)
-    if not channel:
-        print(f"Channel with ID {channel_id} not found")
-
-
-def run_bot():
-    """Run the Discord bot in a separate thread"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    token = os.environ.get('DISCORD_BOT_TOKEN')
-    if not token:
-        print("DISCORD_BOT_TOKEN not found")
-        return
-
-    try:
-        loop.run_until_complete(bot.start(token))
-    except Exception as e:
-        print(f"Bot error: {e}")
-
-
-# Start bot in background thread
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
 
 
 @app.route('/', methods=['GET'])
@@ -134,6 +86,9 @@ def track_view():
     region = get_ip_info(client_ip)
     device = get_device_info(user_agent)
 
+    # Track if this is a new IP
+    is_new_ip = client_ip not in views_data
+
     # Check if IP already exists
     if client_ip in views_data:
         # Update existing IP data
@@ -149,9 +104,9 @@ def track_view():
             'device': device
         }
 
-    # Update Discord file asynchronously
-    if bot_ready and channel:
-        asyncio.run_coroutine_threadsafe(update_views_file(), bot.loop)
+    # Send to Discord (only for new IPs to avoid spam)
+    if is_new_ip:
+        send_to_discord()
 
     return jsonify({
         'status': 'success',
@@ -166,10 +121,13 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'bot_ready': bot_ready,
         'total_unique_ips': len(views_data)
     })
 
+
+# For local testing
+if __name__ == '__main__':
+    app.run(debug=True)
 
 # For local testing
 if __name__ == '__main__':
